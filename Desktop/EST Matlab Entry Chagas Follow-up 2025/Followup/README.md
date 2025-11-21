@@ -1,9 +1,9 @@
 This repository includes two toolboxes packaged directly with the code:
 
-- `wfdb_toolbox/` — provided as standard MATLAB m-code (no installation required)
+
 - `tensor_toolbox-v3.2/` — Tensor Toolbox 
 
-Please add these toolboxes to the MATLAB path before running the scripts:
+Please add this toolboxes to the MATLAB path before running the scripts:
 
 ```matlab
 % Get repository root (directory where this script is located)
