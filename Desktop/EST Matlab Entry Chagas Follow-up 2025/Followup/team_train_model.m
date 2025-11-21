@@ -2,8 +2,8 @@ function team_train_model(input_directory, output_directory, verbose)
 % team_train_model - Parallel version (feature extraction parallelized)
 % Logic, structure, and saving behavior are IDENTICAL to serial version.
 % Only change: uses parfor for feature extraction.
-%  1. TENSOR TOOLBOX Auto-Setup
-%  ===============================
+% 1. TENSOR TOOLBOX Auto-Setup (Path Only, No Unzip)
+% ==================================================
 try
     exist_tt = exist('tensor', 'file') || exist('@tensor', 'dir');
 catch
@@ -11,34 +11,26 @@ catch
 end
 
 if ~exist_tt
-    fprintf('Tensor Toolbox not found. Attempting local setup...\n');
+    fprintf('Tensor Toolbox not found on path. Attempting to add local folder...\n');
 
-    % Determine current script folder
-    this_file   = mfilename('fullpath');
+    % Determine current script folder (works in deployed mode also)
+    this_file   = mfilename('fullpath'); 
     this_folder = fileparts(this_file);
 
-    % Paths
-    zip_path        = fullfile(this_folder, 'tensor_toolbox-v3.2.zip');
-    extract_folder  = fullfile(this_folder, 'tensor_toolbox');
+    % Folder where user has placed the extracted tensor toolbox
+    tensor_folder = fullfile(this_folder, 'tensor_toolbox-v3.2');
 
-    % Auto-extract only if ZIP exists
-    if exist(zip_path, 'file')
-        if ~exist(extract_folder, 'dir')
-            unzip(zip_path, extract_folder);
-            fprintf('Tensor Toolbox extracted.\n');
-        else
-            fprintf('Tensor Toolbox folder already exists. Skipping unzip.\n');
-        end
-
-        % Add toolbox to MATLAB path
-        addpath(genpath(extract_folder));
-        fprintf('Tensor Toolbox added to MATLAB path.\n');
-
+    if exist(tensor_folder, 'dir')
+        addpath(genpath(tensor_folder));
+        fprintf('Tensor Toolbox added to MATLAB path from: %s\n', tensor_folder);
     else
-        fprintf('Tensor Toolbox zip NOT found -> assuming Toolbox is pre-installed (Challenge Docker).\n');
+        fprintf(['WARNING: Tensor Toolbox folder NOT found.\n' ...
+                 'Expected at: %s\n' ...
+                 'Continuing assuming platform already provides Tensor Toolbox.\n'], tensor_folder);
     end
+
 else
-    fprintf('Tensor Toolbox already on path.\n');
+    fprintf('Tensor Toolbox already found on MATLAB path.\n');
 end
 
 
