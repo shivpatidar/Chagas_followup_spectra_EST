@@ -1,45 +1,39 @@
-  function T_tensor_data = create_tensor(leads, fs, r_peaks, window_sec, scales, wavelet, MAX_BEATS)
-        win_len = round(fs * window_sec);
-        beat_tensors_cell = {};
-        
-        % Pad leads in case a beat segment goes out of bounds
-        leads_padded = [leads; zeros(win_len, size(leads, 2))];
-        
-        for r_idx = 1:length(r_peaks)
-            r = r_peaks(r_idx);
-            
-            % Get segment for all 3 leads
-            seg_block = leads_padded(r : (r + win_len - 1), :);
-            
-            % Check for flatline in any lead
-            if any(std(seg_block, 1) < 1e-5)
-                continue; % Skip this beat
-            end
+function T_tensor_data = create_tensor(leads, fs, ~, ~, scales, wavelet, ~)
+% CREATE_TENSOR
+% Uses averaged ECG window directly.
+% No beat extraction, padding, or MAX_BEATS logic.
 
-            feats_for_beat = zeros(length(scales)*2, size(leads, 2)); % Pre-allocate
-            
-            for l = 1:size(leads, 2)
-                seg = seg_block(:, l);
-                feats_for_beat(:, l) = extract_scalogram_matlab(seg, fs, scales, wavelet);
-            end
-            
-            beat_tensors_cell{end+1} = feats_for_beat;
-        end
-        
-        if isempty(beat_tensors_cell)
-            T_tensor_data = [];
-            return;
+    % leads: [samples x numLeads]
+
+    numLeads = size(leads, 2);
+    numFeat  = length(scales) * 2;
+
+    % allocate single "slice"
+    feats_block = zeros(numFeat, numLeads);
+
+    for l = 1:numLeads
+
+        seg = leads(:, l);
+
+        if std(seg) < 1e-5
+            warning('Lead %d nearly flat — zeroing its features.', l);
+            feats_block(:, l) = zeros(numFeat,1);
+            continue;
         end
 
-        % Pad/Truncate beats to MAX_BEATS
-        nb = length(beat_tensors_cell);
-        if nb < MAX_BEATS
-            reps = floor(MAX_BEATS / nb);
-            rem = mod(MAX_BEATS, nb);
-            final_beats = [repmat(beat_tensors_cell, 1, reps), beat_tensors_cell(1:rem)];
-        else
-            final_beats = beat_tensors_cell(1:MAX_BEATS);
-        end
-        
-        T_tensor_data = cat(3, final_beats{:});
+
+        feats_block(:, l) = extract_scalogram_matlab( ...
+                                seg, fs, scales, wavelet);
     end
+        if all(std(leads,0,1) < 1e-5)
+        T_tensor_data = [];
+        return;
+    end
+
+
+    % keep 3-D shape for tensor toolbox compatibility
+    T_tensor_data = reshape(feats_block, ...
+                            size(feats_block,1), ...
+                            size(feats_block,2), ...
+                            1);
+end

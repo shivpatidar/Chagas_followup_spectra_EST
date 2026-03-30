@@ -45,7 +45,7 @@ end
 
 % Find all header files recursively
 records = dir(fullfile(input_directory, '**', '*.hea'));
-num_records = length(records);
+num_records =length(records);
 if num_records < 1
     error('No records were provided')
 end
@@ -59,7 +59,7 @@ if ~isdir(output_directory)
 end
 
 % --- 1. INITIALIZE RAW FEATURE MATRICES ---
-X_projected_raw = [];
+X_full = [];
 X_metadata_raw = [];
 labels = [];
 
@@ -103,6 +103,7 @@ end
 fprintf('Using %d workers (limited by cluster setting of %d) for feature extraction.\n', num_workers, cluster.NumWorkers);
 
 % --- Preallocate cell arrays for parfor aggregation ---
+feat_cell= cell(num_records,1);
 proj_cell = cell(num_records, 1);
 meta_cell = cell(num_records, 1);
 label_cell = cell(num_records, 1);
@@ -112,6 +113,7 @@ progress = 0;
 pct_step = max(1, floor(num_records / 20)); % 5% progress steps
 
 parfor j = 1:num_records
+
     rec_name = records(j).name;
     rec_folder = records(j).folder;
     try
@@ -123,16 +125,23 @@ parfor j = 1:num_records
             proj_cell{j} = [];
             meta_cell{j} = [];
             label_cell{j} = [];
+            feat_cell{j}=[];
             continue;
         end
-        proj_cell{j} = projected_features;
-        meta_cell{j} = metadata_features;
+        feat_indices= load('feat_indices.mat');
+        feat1= [projected_features, metadata_features];
+        feat2=feat1(:,feat_indices.top_indices_1000);
+        feat_cell{j} = sign(feat2) .* log1p(abs(feat2));
+        % proj_cell{j} = sign(projected_features) .* log1p(abs(projected_features));
+        % meta_cell{j} = sign(metadata_features) .* log1p(abs(metadata_features));
+
         label_cell{j} = get_labels(header);
     catch ME
         fprintf('Warning: [FATAL EXTRACTION ERROR] for %s: %s\n', rec_name, ME.message);
         proj_cell{j} = [];
         meta_cell{j} = [];
         label_cell{j} = [];
+        feat_cell{j}=[];
     end
 
     if mod(j, pct_step) == 0
@@ -143,246 +152,103 @@ end
 cd(original_path)
 rmpath(genpath(original_path))
 
-% --- Combine successful entries ---
-valid_idx = ~cellfun(@isempty, proj_cell);
-X_projected_raw = cell2mat(proj_cell(valid_idx));
-X_metadata_raw = cell2mat(meta_cell(valid_idx));
+
+
+valid_idx = ~cellfun(@isempty, feat_cell);
+X_full = cell2mat(feat_cell(valid_idx));
 labels = cell2mat(label_cell(valid_idx));
 
 % --- Add check for no successful records ---
-if isempty(X_projected_raw)
+if isempty(X_full)
     error('Feature extraction failed for ALL records. No data to train on.');
 end
 
 % --- Sanity check ---
-if size(X_projected_raw, 1) ~= length(labels)
+if size(X_full, 1) ~= length(labels)
     error('Internal Data Mismatch: features (%d) ≠ labels (%d).', ...
-        size(X_projected_raw, 1), length(labels));
+        size(X_full, 1), length(labels));
 end
 
 if verbose >= 1
-    fprintf('Raw features collected from %d records.\n', size(X_projected_raw, 1));
-    fprintf('  - X_projected_raw: [%d x %d]\n', size(X_projected_raw));
-    fprintf('  - X_metadata_raw:  [%d x %d]\n', size(X_metadata_raw));
+    fprintf('Raw features collected from %d records.\n', size(X_full, 1));
+    fprintf('  - X_full: [%d x %d]\n', size(X_full));
+    % fprintf('  - X_metadata_raw:  [%d x %d]\n', size(X_metadata_raw));
     fprintf('  - Labels:          [%d x %d]\n', size(labels));
     disp('--------------------------------------------------')
 end
 
-% --- 2. PREPROCESSING & FEATURE SELECTION ---
+% % --- 2. PREPROCESSING & FEATURE SELECTION ---
 % A. Mean imputation for metadata
-meta_mean = zeros(1, size(X_metadata_raw, 2));
-for k = 1:size(X_metadata_raw, 2)
-    col = X_metadata_raw(:, k);
+feat_mean = zeros(1, size(X_full, 2));
+for k = 1:size(X_full, 2)
+    col =X_full(:, k);
     non_nan_col = col(~isnan(col));
     if isempty(non_nan_col)
-        meta_mean(k) = 0;
+        feat_mean(k) = 0;
     else
-        meta_mean(k) = mean(non_nan_col);
+        feat_mean(k) = mean(non_nan_col);
     end
 end
-for k = 1:size(X_metadata_raw, 2)
-    nan_indices = isnan(X_metadata_raw(:, k));
-    X_metadata_raw(nan_indices, k) = meta_mean(k);
+for k = 1:size(X_full, 2)
+    nan_indices = isnan(X_full(:, k));
+    X_full(nan_indices, k) = feat_mean(k);
 end
 
 if verbose >= 1
-    fprintf('Metadata imputation complete. Metadata shape: [%d x %d]\n', size(X_metadata_raw));
+    fprintf('Metadata imputation complete. Metadata shape: [%d x %d]\n', size(X_full));
 end
 
-% B. Scale Projected Features
-proj_mean = mean(X_projected_raw, 1);
-proj_std = std(X_projected_raw, 0, 1) + 1e-8;
-X_std = (X_projected_raw - proj_mean) ./ proj_std;
-clear X_projected_raw; % --- Memory saving: Clear raw projected data
+% %C. Compute Fisher Scores and Select Top 1000
+% if exist('fscmrmr', 'file')
+%     if verbose >= 1
+%         disp('Calculating Fisher Scores using fscmrmr...')
+%     end
+%     [idx, ~] = fscmrmr(X_full1 , labels);
+%     top_indices_1000 = idx(1:1000);
+% else
+%     if verbose >= 1
+%         warning('fscmrmr not found. Using first 1000 indices.');
+%     end
+%     top_indices_1000 = 1:min(1000, size(X_full1 , 2));
+% end
+%top_indices_1000 = 1:min(1000, size(X_full1 , 2));
 
-if verbose >= 1
-    fprintf('Projected features scaled. Shape: [%d x %d]\n', size(X_std));
+%X_full = X_full1(:,top_indices_1000);
+
+
+
+
+
+% clear X_selected;    % --- Memory saving: Clear selected features
+% clear X_metadata_raw; % --- Memory saving: Clear raw metadata
+
+% % E. Final scaling
+ Meann = mean(X_full, 1);
+ Stdd = std(X_full, 0, 1) + 1e-8;
+  features = (X_full - Meann )./ Stdd;
+  features(isnan(features))=0;
+ %clear X_full; % --- Memory saving: Clear unscaled full data
+ classes=sort(unique(labels));
+
+if verbose>=1
+    fprintf('Training the model on the data... \n')
 end
 
-% C. Compute Fisher Scores and Select Top 700
-if exist('fscmrmr', 'file')
-    if verbose >= 1
-        disp('Calculating Fisher Scores using fscmrmr...')
-    end
-    [idx, ~] = fscmrmr(X_std, labels);
-    num_features_to_select = min(700, size(X_std, 2));
-    top_indices_700 = idx(1:num_features_to_select);
-else
-    if verbose >= 1
-        warning('fscmrmr not found. Using first 700 indices.');
-    end
-    top_indices_700 = 1:min(700, size(X_std, 2));
+t = ClassificationTree.template('MaxNumSplits',10); 
+ model = fitensemble(features,labels,'RusBoost',300,t,'type','classification');
+ save_models(output_directory,model,classes,Meann,Stdd)
+
+if verbose>=1
+    fprintf('Done. \n')
+end
 end
 
-X_selected = X_std(:, top_indices_700);
-clear X_std; % --- Memory saving: Clear intermediate scaled data
 
-if verbose >= 1
-    fprintf('Selected %d features.\n', length(top_indices_700));
-end
+function save_models(output_directory, classification_model, classes,Meann,Stdd)
 
-% D. Concatenate with metadata
-X_full = [X_selected, X_metadata_raw];
-clear X_selected;    % --- Memory saving: Clear selected features
-clear X_metadata_raw; % --- Memory saving: Clear raw metadata
+filename = fullfile(output_directory,'classification_model.mat');
+save(filename,'classification_model','classes','-v7.3','Meann','-v7.3','Stdd','-v7.3');
 
-% E. Final scaling
-final_mean = mean(X_full, 1);
-final_std = std(X_full, 0, 1) + 1e-8;
-features_final = (X_full - final_mean) ./ final_std;
-clear X_full; % --- Memory saving: Clear unscaled full data
-
-if verbose >= 1
-    fprintf('Final scaled features shape: [%d x %d]\n', size(features_final));
-    disp('--------------------------------------------------')
-end
-
-% --- 3. DEEP LEARNING MODEL TRAINING ---
-classes = sort(unique(labels));
-if verbose >= 1
-    fprintf('Preparing data and training the Deep Learning Classifier (MLP)... \n')
-end
-
-X = features_final;
-Y = categorical(labels);
-clear features_final; % --- Memory saving: Clear features_final (data is now in X)
-clear labels;         % --- Memory saving: Clear raw labels (data is now in Y and classes)
-
-% Split (5% validation)
-rng(42);
-cv = cvpartition(Y, 'Holdout', 0.05, 'Stratify', true);
-idxTrain = training(cv);
-idxVal = test(cv);
-XTrain = X(idxTrain, :);
-YTrain = Y(idxTrain);
-XVal = X(idxVal, :);
-YVal = Y(idxVal, :);
-clear X; % --- Memory saving: Clear full feature matrix after split
-clear Y; % --- Memory saving: Clear full label vector after split
-
-% --- FIXED categorical comparison ---
-minority_class_label = classes(2);
-minority_label_str = string(minority_class_label);
-idx_minority = find(YTrain == categorical(minority_label_str));
-idx_majority = find(YTrain ~= categorical(minority_label_str));
-
-X_minority = XTrain(idx_minority, :);
-Y_minority = YTrain(idx_minority);
-majority_count = length(idx_majority);
-minority_count = size(X_minority, 1);
-N_synthetic = majority_count - minority_count;
-
-if N_synthetic > 0
-    if verbose >= 1
-        fprintf('Applying SMOTE: Generating %d synthetic samples for class %s.\n', ...
-            N_synthetic, char(minority_label_str));
-    end
-    K_neighbors = 5;
-    if exist('knnsearch', 'file') == 2
-        [X_synth, Y_synth] = smote_data(X_minority, Y_minority, N_synthetic, K_neighbors);
-        XTrain_res = [XTrain; X_synth];
-        YTrain_res = [YTrain; Y_synth];
-    else
-        if verbose >= 1
-            warning('knnsearch not found. Using replication instead of SMOTE.');
-        end
-        oversample_factor = floor(majority_count / minority_count);
-        X_rep = repmat(X_minority, oversample_factor, 1);
-        Y_rep = repmat(Y_minority, oversample_factor, 1);
-        XTrain_res = [XTrain; X_rep];
-        YTrain_res = [YTrain; Y_rep];
-    end
-    shuffler = randperm(size(XTrain_res, 1));
-    XTrain_res = XTrain_res(shuffler, :);
-    YTrain_res = YTrain_res(shuffler);
-    
-    clear X_minority Y_minority; % --- Memory saving: Clear SMOTE inputs
-    if exist('X_synth', 'var')
-        clear X_synth Y_synth; % --- Memory saving: Clear synthetic samples
-    end
-else
-    XTrain_res = XTrain;
-    YTrain_res = YTrain;
-    if verbose >= 1
-        disp('SMOTE skipped: Data already balanced.')
-    end
-end
-
-clear XTrain YTrain; % --- Memory saving: Clear original training set (data is now in XTrain_res/YTrain_res)
-
-classes_str = string(classes);
-YTrain_res = categorical(YTrain_res, classes_str);
-YVal = categorical(YVal, classes_str);
-
-% Convert to single precision
-XTrain_res = single(XTrain_res);
-XVal = single(XVal);
-
-% Remove non-finite rows
-valid_train_rows = all(isfinite(XTrain_res), 2);
-XTrain_res = XTrain_res(valid_train_rows, :);
-YTrain_res = YTrain_res(valid_train_rows);
-
-valid_val_rows = all(isfinite(XVal), 2);
-XVal = XVal(valid_val_rows, :);
-YVal = YVal(valid_val_rows);
-
-YTrain_res = categorical(cellstr(YTrain_res(:)));
-YVal = categorical(cellstr(YVal(:)));
-
-if verbose >= 1
-    fprintf('--- Final Data Shapes ---\n');
-    fprintf('Train: [%d x %d]\n', size(XTrain_res));
-    fprintf('Val:   [%d x %d]\n', size(XVal));
-end
-
-% --- Define Network ---
-numFeatures = size(XTrain_res, 2);
-numClasses = length(classes);
-
-layers = [
-    featureInputLayer(numFeatures, 'Name', 'input')
-    fullyConnectedLayer(512, 'Name', 'fc_512')
-    reluLayer('Name', 'relu_512')
-    batchNormalizationLayer('Name', 'bn_512')
-    dropoutLayer(0.4, 'Name', 'drop_40_1')
-    fullyConnectedLayer(64, 'Name', 'fc_64')
-    reluLayer('Name', 'relu_64')
-    batchNormalizationLayer('Name', 'bn_64')
-    dropoutLayer(0.4, 'Name', 'drop_40_2')
-    fullyConnectedLayer(numClasses, 'Name', 'fc_output')
-    softmaxLayer('Name', 'softmax')
-    classificationLayer('Name', 'output')
-];
-
-options = trainingOptions('adam', ...
-    'InitialLearnRate', 0.005, ...
-    'MaxEpochs', 30, ...
-    'MiniBatchSize', 64, ...
-    'ValidationData', {XVal, YVal}, ...
-    'ValidationFrequency', floor(size(XTrain_res, 1) / 64), ...
-    'ValidationPatience', 10, ...
-    'ExecutionEnvironment', 'cpu', ...
-    'Plots', 'none', ...
-    'Verbose', false, ...
-    'Shuffle', 'every-epoch');
-
-if size(XTrain_res, 1) ~= size(YTrain_res, 1)
-    error('Observation mismatch: XTrain_res (%d) vs YTrain_res (%d).', ...
-        size(XTrain_res, 1), size(YTrain_res, 1));
-end
-
-% --- Train ---
-model = trainNetwork(XTrain_res, YTrain_res, layers, options);
-clear XTrain_res YTrain_res XVal YVal; % --- Memory saving: Clear training/validation data after model creation
-
-% --- Save ---
-save_models(output_directory, model, classes, ...
-    proj_mean, proj_std, top_indices_700, final_mean, final_std);
-
-if verbose >= 1
-    fprintf('✅ Model and preprocessing assets saved to %s.\n', output_directory)
-end
 end
 
 function label = get_labels(header)
@@ -438,18 +304,17 @@ function [X_synth, Y_synth] = smote_data(X_minority, Y_minority, N, K)
     Y_synth = synthetic_labels(1:synth_count);
 end
 
-function save_models(output_directory, classification_model, classes, ...
-    proj_mean, proj_std, top_indices_700, final_mean, final_std)
-    % This helper function saves the model and all required preprocessing assets,
-    % ensuring variable names match the team_run_model loading structure.
-    
-    filename = fullfile(output_directory, 'classification_model.mat');
-    
-    % Save all necessary assets using the required names:
-    % classification_model, classes, proj_mean, proj_std, 
-    % top_indices_700, final_mean, final_std
-    save(filename, 'classification_model', 'classes', ...
-        'proj_mean', 'proj_std', ...
-        'top_indices_700', ...
-        'final_mean', 'final_std', '-v7.3');
-end
+% function save_models(output_directory, classification_model, classes, ...
+%     top_indices_700, final_mean, final_std)
+%     % This helper function saves the model and all required preprocessing assets,
+%     % ensuring variable names match the team_run_model loading structure.
+% 
+%     filename = fullfile(output_directory, 'classification_model.mat');
+% 
+%     % Save all necessary assets using the required names:
+%     % classification_model, classes, proj_mean, proj_std, 
+%     % top_indices_700, final_mean, final_std
+%     save(filename, 'classification_model', 'classes', ...
+%         'top_indices_700', ...
+%         'final_mean', 'final_std', '-v7.3');
+% end

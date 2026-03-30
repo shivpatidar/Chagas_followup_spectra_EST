@@ -14,10 +14,11 @@ function [projected_features, metadata_features] = get_features(file, header)
 
     % --- Define Constants from Python Script ---
     selected_leads_idx = [2, 7, 9]; % MATLAB 1-idx for Python [2, 7, 9] (Leads III, aVL, V2)
+    groups = { [1 2 3], [4 5 6], [7 8 9 10 11 12] };
     MAX_BEATS = 18;
     window_sec = 3;
     scales = 1:64;
-    wavelet = 'mexh'; % Mexican Hat wavelet
+    wavelet = 'coif4'; % coif4 wavelet
     
     projected_features = [];
     metadata_features = [];
@@ -50,7 +51,7 @@ function [projected_features, metadata_features] = get_features(file, header)
     % catch
      %signals=normalize(signals);
     % end
-    
+
     lead2ecg=signals_orig(:,2);
     
     try
@@ -67,38 +68,149 @@ function [projected_features, metadata_features] = get_features(file, header)
     qrs_new=floor(qrs.*(targetFs/fs_orig));
     
     allecg=signals;
+    allecg_beats=signals;
+        %% ======================================================
+    %  REPLACE RAW ECG WITH AVERAGED R-CENTERED WINDOWS
+    % ======================================================
+    
+    win_sec = 4;   % or 4 — match what you validated in testbench
+    half_win = win_sec/2;
+    half_win_samp = round(half_win * fs);
+    
+    rpeaks = qrs_new(:);
+    N = size(allecg,1);
+    
+    windows = {};
+    i = 1;
+    prev_end = -inf;
+    
+    while i <= length(rpeaks)
+    
+        rp = rpeaks(i);
+    
+        start_idx = rp - half_win_samp;
+        end_idx   = rp + half_win_samp;
+    
+        % skip overlapping windows
+        if start_idx <= prev_end
+            i = i + 1;
+            continue;
+        end
+    
+        % bounds
+        if start_idx < 1 || end_idx > N
+            i = i + 1;
+            continue;
+        end
+    
+        windows{end+1} = allecg(start_idx:end_idx, :);
+    
+        prev_end = end_idx;
+    
+        % next window must not overlap
+        i = find(rpeaks > prev_end + half_win_samp, 1, 'first');
+        if isempty(i)
+            break;
+        end
+    end
+    
+    if isempty(windows)
+        warning('No valid windows extracted — keeping original ECG.');
+    else
+        W = cat(3, windows{:});
+        avg_window = mean(W, 3);
+    
+        % 🔥 overwrite allecg with averaged template
+        allecg = avg_window;
+    end
+
     
     % --- 4. Tensor Creation (Real CWT) ---
+    
     leads_for_tensor = allecg(:, selected_leads_idx);
     T_tensor_data = create_tensor(leads_for_tensor, fs, qrs_new, window_sec, scales, wavelet, MAX_BEATS);
     
     if isempty(T_tensor_data)
-        warning('Failed to create tensor (not enough beats?): %s', file);
-        return;
+    
+        warning('Tensor empty. Checking for zero leads and attempting replacement: %s', file);
+    
+        selected_leads_idx_fixed = replace_bad_leads_basic( ...
+            selected_leads_idx, allecg, signals_orig);
+    
+        leads_for_tensor = allecg(:, selected_leads_idx_fixed);
+    
+        T_tensor_data = create_tensor(leads_for_tensor, fs, qrs_new, window_sec, scales, wavelet, MAX_BEATS);
+    
+        if isempty(T_tensor_data)
+            warning('Tensor creation failed even after lead replacement: %s', file);
+            return;
+        end
     end
+
     
     T = tensor(T_tensor_data); % Convert to Tensor Toolbox object
-
-    % --- 5. Tensor Projection (Requires Tensor Toolbox) ---
-    U0_data= load('factor_U1.mat');
-    U1_data = load('factor_U2.mat');
-    U2_data = load('factor_U3.mat');
     
-    U0 = U0_data.U1;
-    U1 = U1_data.U2;
-    U2 = U2_data.U3;
+     % --- 4. Tensor Creation (Real CWT) ---
+    selected_leads_idx = [2, 7, 9]; % MATLAB 1-idx for Python [2, 7, 9] (Leads III, aVL, V2)
+    MAX_BEATS = 18;
+    window_sec = 3;
+    scales = 1:64;
+    wavelet = 'mexh';
+    leads_for_tensor_beats = allecg_beats(:, selected_leads_idx);
+    T_tensor_data_beats = create_tensor_beats(leads_for_tensor_beats, fs, qrs_new, window_sec, scales, wavelet, MAX_BEATS);
 
-    % Check dimensions explicitly before ttm
-    if size(T, 1) ~= size(U0, 1) || size(T, 2) ~= size(U1, 1) || size(T, 3) ~= size(U2, 1)
-        error('Tensor/Factor dimension mismatch. T_size=[%d,%d,%d], U0=%d, U1=%d, U2=%d', ...
-            size(T,1), size(T,2), size(T,3), size(U0,1), size(U1,1), size(U2,1));
+    if isempty(T_tensor_data_beats)
+    
+        warning('Tensor empty. Checking for zero leads and attempting replacement: %s', file);
+    
+        selected_leads_idx_fixed = replace_bad_leads_basic( ...
+            selected_leads_idx, allecg_beats, signals_orig);
+    
+        leads_for_tensor = allecg_beats(:, selected_leads_idx_fixed);
+    
+        T_tensor_data_beats = create_tensor(leads_for_tensor_beats, fs, qrs_new, window_sec, scales, wavelet, MAX_BEATS);
+    
+        if isempty(T_tensor_data)
+            warning('Tensor creation failed even after lead replacement: %s', file);
+            return;
+        end
     end
     
-    core = ttm(T, U0', 1); % Mode 1 projection
+    T_beats = tensor(T_tensor_data_beats); % Convert to Tensor Toolbox object
+
+    % --- 5. Tensor Projection (Requires Tensor Toolbox) ---
+    U0_data = load('factor_U1_cov.mat');
+    U1_data = load('factor_U2_cov.mat');
+    U2_data = load('factor_U3_cov.mat');
+    
+    U0 = U0_data.U0;
+    U1 = U1_data.U1;
+    U2 = U2_data.U2;
+
+    % Check dimensions explicitly before ttm
+    if size(T_beats, 1) ~= size(U0, 1) || size(T_beats, 2) ~= size(U1, 1) || size(T_beats, 3) ~= size(U2, 1)
+        error('Tensor/Factor dimension mismatch. T_size=[%d,%d,%d], U0=%d, U1=%d, U2=%d', ...
+            size(T_beats,1), size(T_beats,2), size(T_beats,3), size(U0,1), size(U1,1), size(U2,1));
+    end
+      
+    core = ttm(T_beats, U0', 1); % Mode 1 projection
     core = ttm(core, U1', 2); % Mode 2 projection
     core = ttm(core, U2', 3); % Mode 3 projection
+
     
-    projected_features = core.data(:)'; 
+    % --- Flatten individually ---
+    core_flat = core.data(:);   % [numel(core) x 1]
+    T_flat    = T.data(:);      % [numel(T)    x 1]
+    
+    % --- Concatenate feature vectors ---
+    combo_flat = [core_flat; T_flat]';  % row vector
+
+
+    
+
+    
+    projected_features = combo_flat;
+
 
     % --- 6. Metadata and Statistical Features ---
     age = get_age(header);
@@ -112,7 +224,15 @@ function [projected_features, metadata_features] = get_features(file, header)
     [hrv_rr_stats, hrv_hr_stats] = compute_hrv_features(qrs_new, fs);
     
     % Concatenate all metadata (must match Python order)
-    metadata_features = [age, sex, weight, stats_12_lead, hrv_hr_stats', hrv_rr_stats'];
+    qrs_sign_feat   = mean(sign);
+    qrs_thresh_feat = mean(en_thres);
+
+    metadata_features = [ ...
+        age, sex, weight, ...
+        qrs_sign_feat, qrs_thresh_feat, ...
+        stats_12_lead, ...
+        hrv_hr_stats', hrv_rr_stats' ...
+    ];
 
     
 %% --- NESTED HELPER FUNCTIONS --- %%
@@ -193,7 +313,47 @@ function [projected_features, metadata_features] = get_features(file, header)
     end
 
     % --- Tensor Creation (CWT) ---
-    function T_tensor_data = create_tensor(leads, fs, r_peaks, window_sec, scales, wavelet, MAX_BEATS)
+    function T_tensor_data = create_tensor(leads, fs, ~, ~, scales, wavelet, ~)
+    % CREATE_TENSOR
+    % Uses averaged ECG window directly.
+    % No beat extraction, padding, or MAX_BEATS logic.
+    
+        % leads: [samples x numLeads]
+    
+        numLeads = size(leads, 2);
+        numFeat  = length(scales) * 2;
+    
+        % allocate single "slice"
+        feats_block = zeros(numFeat, numLeads);
+    
+        for l = 1:numLeads
+    
+            seg = leads(:, l);
+    
+            if std(seg) < 1e-5
+                warning('Lead %d nearly flat — zeroing its features.', l);
+                feats_block(:, l) = zeros(numFeat,1);
+                continue;
+            end
+    
+    
+            feats_block(:, l) = extract_scalogram_matlab( ...
+                                    seg, fs, scales, wavelet);
+        end
+            if all(std(leads,0,1) < 1e-5)
+            T_tensor_data = [];
+            return;
+        end
+    
+    
+        % keep 3-D shape for tensor toolbox compatibility
+        T_tensor_data = reshape(feats_block, ...
+                                size(feats_block,1), ...
+                                size(feats_block,2), ...
+                                1);
+    end
+    
+      function T_tensor_data_beats = create_tensor_beats(leads, fs, r_peaks, window_sec, scales, wavelet, MAX_BEATS)
         win_len = round(fs * window_sec);
         beat_tensors_cell = {};
         
@@ -236,7 +396,7 @@ function [projected_features, metadata_features] = get_features(file, header)
             final_beats = beat_tensors_cell(1:MAX_BEATS);
         end
         
-        T_tensor_data = cat(3, final_beats{:});
+        T_tensor_data_beats = cat(3, final_beats{:});
     end
 
     function features = extract_scalogram_matlab(sig, fs, scales, wavelet)
@@ -424,6 +584,77 @@ function [projected_features, metadata_features] = get_features(file, header)
     end
 
 end
+function fixed_idx = replace_bad_leads_basic(selected_idx, allecg, signals_orig)
+
+groups = { [1 2 3], [4 5 6], [7 8 9 10 11 12] };
+fixed_idx = selected_idx;
+
+num_leads_available = size(signals_orig, 2);
+
+for k = 1:length(selected_idx)
+
+    idx = selected_idx(k);
+    is_bad = false;
+
+    % Index out of bounds
+    if idx > size(allecg, 2)
+        is_bad = true;
+    else
+        sig = allecg(:, idx);
+
+        % Basic validity check
+        if isempty(sig) || all(sig == 0) || all(isnan(sig))
+            is_bad = true;
+        end
+    end
+
+    if ~is_bad
+        continue;
+    end
+
+    % -------- Find group ----------
+    found_group = [];
+    for g = 1:length(groups)
+        if any(groups{g} == idx)
+            found_group = groups{g};
+            break;
+        end
+    end
+
+    if isempty(found_group)
+        warning('Lead %d not found in any group. Skipping replacement.', idx);
+        continue;
+    end
+
+    % -------- Find replacement ----------
+    candidates = found_group(found_group <= num_leads_available);
+    replacement = [];
+
+    for c = candidates
+        if c > size(allecg, 2)
+            continue;
+        end
+
+        sig_c = allecg(:, c);
+
+        if isempty(sig_c) || all(sig_c == 0) || all(isnan(sig_c))
+            continue;
+        end
+
+        replacement = c;
+        break;
+    end
+
+    if isempty(replacement)
+        warning('No valid replacement found for bad lead %d.', idx);
+    else
+        warning('Lead %d is invalid (all zero). Replacing with lead %d.', idx, replacement);
+        fixed_idx(k) = replacement;
+    end
+
+end
+end
+
 
 
 % % --- Plot ECG and detected peaks ---
