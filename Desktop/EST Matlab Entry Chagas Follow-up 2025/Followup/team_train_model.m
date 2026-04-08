@@ -130,7 +130,8 @@ parfor j = 1:num_records
         end
         feat_indices= load('feat_indices.mat');
         feat1= [projected_features, metadata_features];
-        feat2=feat1(:,feat_indices.top_indices_1000);
+        %feat2=feat1(:,feat_indices.top_indices_1000);
+        feat2=feat1;
         feat_cell{j} = sign(feat2) .* log1p(abs(feat2));
         % proj_cell{j} = sign(projected_features) .* log1p(abs(projected_features));
         % meta_cell{j} = sign(metadata_features) .* log1p(abs(metadata_features));
