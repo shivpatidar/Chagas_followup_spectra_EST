@@ -67,7 +67,7 @@ try
     X_full = [projected_features, metadata_features];
     % C. Apply Fisher-selected indices
     feat_indices= load('feat_indices.mat');
-    X_full = X_full(:, feat_indices.top_indices_1000);
+    %X_full = X_full(:, feat_indices.top_indices_1000);
  
     % E. Final scaling (Stage 2 Scaling)
     features_final = (X_full - scaler_final_mean) ./ scaler_final_std;
