@@ -22,7 +22,6 @@ The evaluation code is **not included in this repository**. The generated model 
 To run the code directly, you need:
 
 * MATLAB;
-* the required MATLAB toolboxes for the implementation; and
 * the Challenge data.
 
 The Challenge data should be prepared according to the instructions provided with the 2025 Challenge.
